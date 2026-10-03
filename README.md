@@ -1,4 +1,4 @@
- Check my project here :  real-time-human-translation-layer.vercel.app
+ Check my project here :  (https://real-time-human-translation-layer.vercel.app/)
 # Real-Time Human Translation Layer
 
 A browser-based real-time speech translation prototype.
