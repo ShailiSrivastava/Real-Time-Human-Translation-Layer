@@ -1,52 +1,64 @@
-import asyncio
 import os
-from typing import Optional
+import re
+from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from google import genai
 from google.genai import types
-from pydantic import BaseModel
 
+
+# ============================================================
+# Environment
+# ============================================================
 
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY:
-    raise RuntimeError(
-        "GEMINI_API_KEY is missing. Create backend/.env from backend/.env.example."
-    )
+    raise RuntimeError("GEMINI_API_KEY is not configured.")
+
+
+# ============================================================
+# Gemini client
+# ============================================================
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-CONFIGURED_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash").strip() or "gemini-3.5-flash"
-AVAILABLE_MODELS = list(dict.fromkeys([
-    CONFIGURED_MODEL,
-    "gemini-3.5-flash",
-    "gemini-3.5-flash-lite",
-    "gemini-3.8-flash",
-]))
+
+# ============================================================
+# FastAPI app
+# ============================================================
 
 app = FastAPI(
-    title="Human Translation Layer API",
+    title="Real-Time Human Translation Layer",
     version="1.0.0",
 )
 
-# CORS is kept for direct local API testing. The React app normally uses
-# the Vite /api proxy, so browser requests stay on localhost:5173.
+
+# ============================================================
+# CORS
+# ============================================================
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://real-time-human-translation-layer.vercel.app",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+# ============================================================
+# Supported languages
+# ============================================================
 
 LANGUAGE_NAMES = {
     "en": "English",
@@ -71,6 +83,10 @@ LANGUAGE_NAMES = {
 }
 
 
+# ============================================================
+# Request / Response models
+# ============================================================
+
 class TranslationRequest(BaseModel):
     text: str
     source: str
@@ -81,92 +97,111 @@ class TranslationResponse(BaseModel):
     translation: str
 
 
-def language_name(code: str) -> str:
-    normalized = code.strip().lower()
-    return LANGUAGE_NAMES.get(normalized, normalized)
-
-
-def extract_response_text(response) -> Optional[str]:
-    """
-    Read final text robustly from the Gemini SDK response.
-
-    response.text is normally enough, but we also inspect candidate parts
-    so a valid text part is not lost when the SDK response contains
-    additional metadata/thinking parts.
-    """
-    try:
-        text = response.text
-        if isinstance(text, str) and text.strip():
-            return text.strip()
-    except Exception:
-        pass
-
-    candidates = getattr(response, "candidates", None) or []
-
-    collected: list[str] = []
-
-    for candidate in candidates:
-        content = getattr(candidate, "content", None)
-        parts = getattr(content, "parts", None) or []
-
-        for part in parts:
-            part_text = getattr(part, "text", None)
-
-            if not isinstance(part_text, str) or not part_text.strip():
-                continue
-
-            # Do not return a private/internal thought as the translation.
-            if getattr(part, "thought", False):
-                continue
-
-            collected.append(part_text.strip())
-
-    if collected:
-        return "\n".join(collected).strip()
-
-    return None
-
+# ============================================================
+# Helpers
+# ============================================================
 
 def clean_translation(text: str) -> str:
     """
-    Remove accidental wrapping quotes/code fences without altering
-    the actual translated sentence.
+    Clean accidental formatting returned by the model.
     """
-    result = text.strip()
 
-    if result.startswith("```") and result.endswith("```"):
-        result = result[3:-3].strip()
+    text = text.strip()
 
-    if len(result) >= 2:
-        if (result[0], result[-1]) in {
-            ('"', '"'),
-            ("'", "'"),
-            ("“", "”"),
-            ("‘", "’"),
-        }:
-            result = result[1:-1].strip()
+    # Remove markdown code fences.
+    text = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
 
-    return result
+    # Remove accidental surrounding quotes.
+    if len(text) >= 2:
+        if (
+            (text.startswith('"') and text.endswith('"'))
+            or (text.startswith("'") and text.endswith("'"))
+        ):
+            text = text[1:-1].strip()
 
+    return text.strip()
+
+
+def extract_response_text(response: Any) -> str:
+    """
+    Safely extract text from a Gemini response.
+
+    Prefer response.text, then fall back to candidate parts.
+    """
+
+    try:
+        direct_text = response.text
+
+        if isinstance(direct_text, str) and direct_text.strip():
+            return direct_text.strip()
+    except Exception:
+        pass
+
+    try:
+        candidates = getattr(response, "candidates", None) or []
+
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+
+            if not content:
+                continue
+
+            parts = getattr(content, "parts", None) or []
+
+            collected = []
+
+            for part in parts:
+                # Ignore thought parts if Gemini returns them.
+                if getattr(part, "thought", False):
+                    continue
+
+                part_text = getattr(part, "text", None)
+
+                if isinstance(part_text, str) and part_text.strip():
+                    collected.append(part_text.strip())
+
+            if collected:
+                return "\n".join(collected).strip()
+
+    except Exception:
+        pass
+
+    return ""
+
+
+# ============================================================
+# Routes
+# ============================================================
 
 @app.get("/")
-async def root():
+def health_check():
     return {
-        "message": "Human Translation Layer API is running",
         "status": "ok",
+        "service": "Real-Time Human Translation Layer",
     }
 
 
 @app.get("/health")
-async def health():
-    return {"status": "ok"}
+def health():
+    return {
+        "status": "healthy",
+    }
 
 
-@app.post("/api/translate", response_model=TranslationResponse)
-async def translate(request: TranslationRequest):
+@app.post(
+    "/api/translate",
+    response_model=TranslationResponse,
+)
+def translate(request: TranslationRequest):
+
     text = request.text.strip()
-    source_code = request.source.strip().lower()
-    target_code = request.target.strip().lower()
+    source = request.source.strip().lower()
+    target = request.target.strip().lower()
+
+    # --------------------------------------------------------
+    # Validation
+    # --------------------------------------------------------
 
     if not text:
         raise HTTPException(
@@ -174,75 +209,118 @@ async def translate(request: TranslationRequest):
             detail="Text cannot be empty.",
         )
 
-    if not source_code or not target_code:
+    if source not in LANGUAGE_NAMES:
         raise HTTPException(
             status_code=400,
-            detail="Source and target languages are required.",
+            detail=f"Unsupported source language: {source}",
         )
 
-    if source_code == target_code:
-        return TranslationResponse(translation=text)
+    if target not in LANGUAGE_NAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported target language: {target}",
+        )
 
-    source_language = language_name(source_code)
-    target_language = language_name(target_code)
+    # No translation needed.
+    if source == target:
+        return TranslationResponse(
+            translation=text
+        )
+
+    source_language = LANGUAGE_NAMES[source]
+    target_language = LANGUAGE_NAMES[target]
+
+    # --------------------------------------------------------
+    # Translation prompt
+    # --------------------------------------------------------
 
     prompt = f"""
-You are the translation engine for a real-time conversation app.
+You are a professional real-time translation engine.
 
-Translate the user's message from {source_language} to {target_language}.
+Translate the user's text from {source_language} to {target_language}.
 
-Rules:
-- Return ONLY the translation.
-- Do not explain anything.
-- Do not add quotation marks.
-- Do not add labels such as "Translation:".
-- Do not transliterate the source language unless the target language itself uses that script.
-- Use the normal written script of the target language.
-- Preserve the meaning, names, numbers, punctuation, and important terminology.
-- Preserve conversational tone and formality.
-- Do not invent information.
-- Translate naturally rather than word-for-word when a natural translation is more appropriate.
-- Keep short conversational phrases short.
+STRICT RULES:
 
-Source language: {source_language}
-Target language: {target_language}
+1. Return ONLY the translated text.
+2. Do not explain the translation.
+3. Do not add labels such as "Translation:".
+4. Do not use quotation marks around the translation.
+5. Preserve the original meaning exactly.
+6. Preserve names, numbers, punctuation, and important terminology.
+7. Preserve the speaker's tone and level of formality.
+8. Do NOT transliterate unless the target language normally requires
+   that form of writing.
+9. Use the normal writing system/script of the target language.
+10. Keep short conversational phrases short and natural.
+11. Do not add information that does not exist in the original.
+12. If the input is already a natural sentence, translate it directly.
+13. If the input is informal, keep the translation informal.
+14. If the input is a question, keep it as a question.
 
-User message:
+Source language:
+{source_language}
+
+Target language:
+{target_language}
+
+Text to translate:
 {text}
 """.strip()
 
-    last_error: Optional[Exception] = None
+    # --------------------------------------------------------
+    # Gemini request
+    # --------------------------------------------------------
 
-    for model_name in AVAILABLE_MODELS:
-        for attempt in range(2):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        max_output_tokens=256,
-                        thinking_config=types.ThinkingConfig(
-                            thinking_level="low"
-                        ),
-                        response_mime_type="text/plain",
-                    ),
-                )
+    try:
+        response = client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.1,
+                max_output_tokens=256,
+                response_mime_type="text/plain",
+                thinking_config=types.ThinkingConfig(
+                    thinking_level="low"
+                ),
+            ),
+        )
 
-                translation = extract_response_text(response)
+        translation = extract_response_text(response)
+        translation = clean_translation(translation)
 
-                if translation:
-                    translation = clean_translation(translation)
+        if not translation:
+            print(
+                "[Translation] Gemini returned an empty response."
+            )
 
-                if translation:
-                    return TranslationResponse(translation=translation)
+            raise HTTPException(
+                status_code=502,
+                detail="Gemini returned an empty translation.",
+            )
 
-            except Exception as error:
-                last_error = error
-                print(f"[Gemini] ({model_name} attempt {attempt + 1}) error: {type(error).__name__}: {error}")
-                await asyncio.sleep(0.5)
+        print(
+            f"[Translation] "
+            f"{source_language} -> {target_language}: "
+            f"{text!r} -> {translation!r}"
+        )
 
-    print(f"[Gemini] All translation attempts failed. Last error: {last_error}")
-    raise HTTPException(
-        status_code=502,
-        detail="Translation service failed. Please check the backend terminal.",
-    )
+        return TranslationResponse(
+            translation=translation
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as error:
+        print(
+            "[Translation] Gemini error:",
+            repr(error),
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Translation service failed. "
+                "Check the Render logs for the Gemini error."
+            ),
+        )
