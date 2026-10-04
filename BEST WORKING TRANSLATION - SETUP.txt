@@ -1,0 +1,15 @@
+BEST WORKING TRANSLATION
+
+This version contains the cleaned frontend voice/recognition flow and the current Gemini Flash-Lite backend configuration.
+
+Important:
+- Do NOT include backend/.env in GitHub or the zip. Put your own GEMINI_API_KEY in backend/.env.
+- Browser speech recognition and browser speech synthesis depend on Chrome/Windows support and installed voice packs.
+- The app sets the target BCP-47 language and does not force a specific voice, which is more reliable across machines.
+- A language can only be spoken natively when the browser/OS has a compatible voice. If a voice pack is unavailable, the browser may use a fallback voice.
+
+Local run:
+1. npm install
+2. Terminal A: python -m uvicorn backend.main:app --reload
+3. Terminal B: npm run dev
+4. Open http://localhost:5173
