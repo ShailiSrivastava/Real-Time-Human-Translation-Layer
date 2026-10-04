@@ -1,6 +1,9 @@
 import type { Language } from '../types';
 
-const TRANSLATION_ENDPOINT = '/api/translate';
+const TRANSLATION_ENDPOINT =
+  import.meta.env.PROD
+    ? 'https://real-time-human-translation-layer.onrender.com/api/translate'
+    : '/api/translate';
 
 interface TranslationResponse {
   translation?: string;
